@@ -1,0 +1,230 @@
+name: Release macOS aarch64
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release'
+        required: true
+        default: 'v1.0.0'
+
+jobs:
+  build-macos-aarch64:
+    runs-on: macos-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Pre-setup steps to download Bazel before firewall restrictions
+      - name: Pre-download Bazel
+        run: |
+          # Download Bazel binary directly before firewall restrictions
+          mkdir -p $HOME/.cache/bazel
+          BAZEL_VERSION="6.4.0"
+          curl -L -o $HOME/.cache/bazel/bazel-${BAZEL_VERSION}-darwin-arm64 \
+            https://github.com/bazelbuild/bazel/releases/download/${BAZEL_VERSION}/bazel-${BAZEL_VERSION}-darwin-arm64
+          chmod +x $HOME/.cache/bazel/bazel-${BAZEL_VERSION}-darwin-arm64
+          # Set up environment
+          echo "USE_BAZEL_VERSION=${BAZEL_VERSION}" >> $GITHUB_ENV
+          echo "BAZELISK_HOME=$HOME/.cache/bazel" >> $GITHUB_ENV
+
+      - name: Setup Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Setup Bazel
+        run: |
+          # Use the pre-downloaded Bazel binary
+          sudo cp $HOME/.cache/bazel/bazel-${USE_BAZEL_VERSION}-darwin-arm64 /usr/local/bin/bazel-binary
+          sudo chmod +x /usr/local/bin/bazel-binary
+          # Test Bazel installation
+          /usr/local/bin/bazel-binary version
+
+      - name: Install dependencies
+        run: |
+          # Install coreutils for realpath command
+          brew install coreutils
+
+      - name: Setup repository for macOS
+        run: |
+          # Run the standard install script with error handling
+          ./Scripts/install.sh || true
+          
+          # Configure Bazel for offline/minimal network usage
+          echo "build --repository_cache=$HOME/.cache/bazel-repo" >> .bazelrc.local
+          echo "build --disk_cache=$HOME/.cache/bazel-disk" >> .bazelrc.local
+          mkdir -p $HOME/.cache/bazel-repo $HOME/.cache/bazel-disk
+
+      - name: Build macOS binaries
+        timeout-minutes: 60
+        run: |
+          # Set up Bazel with better error handling and networking resilience
+          export BAZEL_BIN="/usr/local/bin/bazel-binary"
+          
+          # Verify Bazel is working
+          echo "Testing Bazel installation..."
+          $BAZEL_BIN version
+          
+          # Query available targets first
+          echo "Querying available targets..."
+          $BAZEL_BIN query //Apps:* || echo "Query failed, continuing with known targets"
+          
+          # Build all the main binaries for macOS with verbose output
+          echo "Building ModelConverter..."
+          $BAZEL_BIN build --config=release //Apps:ModelConverter --verbose_failures --show_progress_rate_limit=5
+          
+          echo "Building LoRAConverter..."
+          $BAZEL_BIN build --config=release //Apps:LoRAConverter --verbose_failures --show_progress_rate_limit=5
+          
+          echo "Building EmbeddingConverter..."
+          $BAZEL_BIN build --config=release //Apps:EmbeddingConverter --verbose_failures --show_progress_rate_limit=5
+          
+          echo "Building ModelQuantizer..."
+          $BAZEL_BIN build --config=release //Apps:ModelQuantizer --verbose_failures --show_progress_rate_limit=5
+          
+          echo "Building gRPCServerCLI-macOS..."
+          $BAZEL_BIN build --config=release //Apps:gRPCServerCLI-macOS --verbose_failures --show_progress_rate_limit=5
+          
+          # Verify binaries were built
+          echo "Verifying built binaries..."
+          ls -la bazel-bin/Apps/ || echo "Bazel-bin directory not found"
+          
+          # Check for standard binaries
+          for binary in ModelConverter LoRAConverter EmbeddingConverter ModelQuantizer; do
+            if [ -f "bazel-bin/Apps/$binary" ]; then
+              echo "Found $binary:"
+              file "bazel-bin/Apps/$binary"
+              ls -la "bazel-bin/Apps/$binary"
+            else
+              echo "Warning: $binary not found in expected location"
+            fi
+          done
+          
+          # Check the macOS app bundle structure
+          echo "Checking gRPCServerCLI-macOS app bundle..."
+          if [ -d "bazel-bin/Apps/gRPCServerCLI-macOS.app" ]; then
+            find bazel-bin/Apps/gRPCServerCLI-macOS.app -type f | head -10
+          else
+            echo "Warning: gRPCServerCLI-macOS.app not found"
+          fi
+
+      - name: Package macOS binaries
+        run: |
+          mkdir -p dist/macos-aarch64
+          
+          # Copy binaries to dist directory with error checking
+          echo "Copying binaries..."
+          for binary in ModelConverter LoRAConverter EmbeddingConverter ModelQuantizer; do
+            if [ -f "bazel-bin/Apps/$binary" ]; then
+              echo "Copying $binary..."
+              cp "bazel-bin/Apps/$binary" "dist/macos-aarch64/"
+            else
+              echo "Error: $binary not found for packaging"
+              exit 1
+            fi
+          done
+          
+          # For macOS, extract the binary from the .app bundle with better error handling
+          if [ -f "bazel-bin/Apps/gRPCServerCLI-macOS.app/Contents/MacOS/gRPCServerCLI-macOS" ]; then
+            echo "Copying gRPCServerCLI-macOS from app bundle..."
+            cp bazel-bin/Apps/gRPCServerCLI-macOS.app/Contents/MacOS/gRPCServerCLI-macOS dist/macos-aarch64/gRPCServerCLI-macOS
+          else
+            echo "Warning: gRPCServerCLI-macOS not found in expected location"
+            echo "Searching for gRPCServerCLI in app bundle..."
+            if [ -d "bazel-bin/Apps/gRPCServerCLI-macOS.app" ]; then
+              find bazel-bin/Apps/gRPCServerCLI-macOS.app -name "*gRPCServerCLI*" -type f
+              # Try to find and copy it anyway
+              GRPC_BINARY=$(find bazel-bin/Apps/gRPCServerCLI-macOS.app -name "*gRPCServerCLI*" -type f | head -1)
+              if [ -n "$GRPC_BINARY" ]; then
+                echo "Found gRPC binary at: $GRPC_BINARY"
+                cp "$GRPC_BINARY" dist/macos-aarch64/gRPCServerCLI-macOS
+              else
+                echo "Error: Could not find gRPCServerCLI-macOS binary"
+                exit 1
+              fi
+            else
+              echo "Error: gRPCServerCLI-macOS.app not found"
+              exit 1
+            fi
+          fi
+          
+          # Make sure all binaries are executable
+          chmod +x dist/macos-aarch64/*
+          
+          # Verify files and show sizes
+          echo "Packaged binaries:"
+          ls -lah dist/macos-aarch64/
+          
+          # Verify all expected files are present
+          for binary in ModelConverter LoRAConverter EmbeddingConverter ModelQuantizer gRPCServerCLI-macOS; do
+            if [ ! -f "dist/macos-aarch64/$binary" ]; then
+              echo "Error: $binary missing from dist directory"
+              exit 1
+            fi
+          done
+          
+          # Create archive
+          cd dist
+          tar -czf draw-things-macos-aarch64.tar.gz macos-aarch64/
+          
+          # Show archive info
+          echo "Archive created:"
+          ls -lah draw-things-macos-aarch64.tar.gz
+          
+          # Verify archive contents
+          echo "Archive contents:"
+          tar -tzf draw-things-macos-aarch64.tar.gz
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: draw-things-macos-aarch64
+          path: dist/draw-things-macos-aarch64.tar.gz
+          retention-days: 30
+
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: dist/draw-things-macos-aarch64.tar.gz
+          name: Release ${{ github.ref_name }}
+          body: |
+            Draw Things Community Release ${{ github.ref_name }}
+            
+            ## macOS aarch64 (Apple Silicon) Binaries
+            
+            This archive contains the following binaries built for macOS Apple Silicon:
+            
+            - **ModelConverter** - Convert models between different formats
+            - **LoRAConverter** - Convert LoRA models  
+            - **EmbeddingConverter** - Convert embedding models
+            - **ModelQuantizer** - Quantize models for better performance
+            - **gRPCServerCLI-macOS** - gRPC server for Draw Things (macOS optimized)
+            
+            ## Usage
+            
+            Extract the archive and run the binaries:
+            ```bash
+            tar -xzf draw-things-macos-aarch64.tar.gz
+            cd macos-aarch64
+            ./gRPCServerCLI-macOS /path/to/models
+            ```
+            
+            ## Requirements
+            
+            - macOS 13.0 or later
+            - Apple Silicon (M1/M2/M3) processor
+            
+            **Security Note:** On first run, macOS may show a security warning. Go to System Preferences > Privacy & Security to allow the applications to run.
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
