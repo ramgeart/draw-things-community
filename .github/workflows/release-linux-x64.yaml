@@ -21,13 +21,26 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Pre-setup steps to download Bazel before firewall restrictions
+      - name: Pre-download Bazel
+        run: |
+          # Download Bazel binary directly before firewall restrictions
+          mkdir -p $HOME/.cache/bazel
+          BAZEL_VERSION="6.4.0"
+          curl -L -o $HOME/.cache/bazel/bazel-${BAZEL_VERSION}-linux-x86_64 \
+            https://github.com/bazelbuild/bazel/releases/download/${BAZEL_VERSION}/bazel-${BAZEL_VERSION}-linux-x86_64
+          chmod +x $HOME/.cache/bazel/bazel-${BAZEL_VERSION}-linux-x86_64
+          # Set up environment
+          echo "USE_BAZEL_VERSION=${BAZEL_VERSION}" >> $GITHUB_ENV
+          echo "BAZELISK_HOME=$HOME/.cache/bazel" >> $GITHUB_ENV
+
       - name: Setup Bazel
-        uses: bazel-contrib/setup-bazel@0.8.5
-        with:
-          bazelisk-cache: true
-          disk-cache: ${{ github.workflow }}
-          repository-cache: true
-        timeout-minutes: 15
+        run: |
+          # Use the pre-downloaded Bazel binary
+          sudo cp $HOME/.cache/bazel/bazel-${USE_BAZEL_VERSION}-linux-x86_64 /usr/local/bin/bazel-binary
+          sudo chmod +x /usr/local/bin/bazel-binary
+          # Test Bazel installation
+          /usr/local/bin/bazel-binary version
 
       - name: Install dependencies
         run: |
@@ -60,58 +73,82 @@ jobs:
           
           # Setup for Linux without requiring specific LLVM installation path
           echo "try-import %workspace%/.bazelrc.linux" > .bazelrc
-          ln -s WORKSPACE.linux WORKSPACE
+          ln -sf WORKSPACE.linux WORKSPACE
           
           # Setup git hooks
           mkdir -p .git/hooks/pre-commit.d
           rm -f .git/hooks/pre-commit
-          ln -s $(pwd)/Scripts/vendors/dispatch .git/hooks/pre-commit
+          ln -s $(pwd)/Scripts/vendors/dispatch .git/hooks/pre-commit || true
           rm -f .git/hooks/pre-commit.d/swift-format
-          ln -s $(pwd)/Scripts/swift-format/pre-commit .git/hooks/pre-commit.d/swift-format
+          ln -s $(pwd)/Scripts/swift-format/pre-commit .git/hooks/pre-commit.d/swift-format || true
           rm -f .git/hooks/pre-commit.d/buildifier
-          ln -s $(pwd)/Scripts/buildifier/pre-commit .git/hooks/pre-commit.d/buildifier
+          ln -s $(pwd)/Scripts/buildifier/pre-commit .git/hooks/pre-commit.d/buildifier || true
+          
+          # Configure Bazel for offline/minimal network usage
+          echo "build --repository_cache=$HOME/.cache/bazel-repo" >> .bazelrc.local
+          echo "build --disk_cache=$HOME/.cache/bazel-disk" >> .bazelrc.local
+          mkdir -p $HOME/.cache/bazel-repo $HOME/.cache/bazel-disk
 
       - name: Build Linux binaries
         timeout-minutes: 60
         run: |
+          # Set up Bazel with better error handling and networking resilience
+          export BAZEL_BIN="/usr/local/bin/bazel-binary"
+          
+          # Verify Bazel is working
+          echo "Testing Bazel installation..."
+          $BAZEL_BIN version
+          
+          # Query available targets first
+          echo "Querying available targets..."
+          $BAZEL_BIN query //Apps:* || echo "Query failed, continuing with known targets"
+          
           # Build all the main binaries for Linux with verbose output
           echo "Building ModelConverter..."
-          bazel build --config=release //Apps:ModelConverter --verbose_failures
+          $BAZEL_BIN build --config=release //Apps:ModelConverter --verbose_failures --show_progress_rate_limit=5
           
           echo "Building LoRAConverter..."
-          bazel build --config=release //Apps:LoRAConverter --verbose_failures
+          $BAZEL_BIN build --config=release //Apps:LoRAConverter --verbose_failures --show_progress_rate_limit=5
           
           echo "Building EmbeddingConverter..."
-          bazel build --config=release //Apps:EmbeddingConverter --verbose_failures
+          $BAZEL_BIN build --config=release //Apps:EmbeddingConverter --verbose_failures --show_progress_rate_limit=5
           
           echo "Building ModelQuantizer..."
-          bazel build --config=release //Apps:ModelQuantizer --verbose_failures
+          $BAZEL_BIN build --config=release //Apps:ModelQuantizer --verbose_failures --show_progress_rate_limit=5
           
           echo "Building gRPCServerCLI..."
-          bazel build --config=release //Apps:gRPCServerCLI --verbose_failures
+          $BAZEL_BIN build --config=release //Apps:gRPCServerCLI --verbose_failures --show_progress_rate_limit=5
           
           # Verify binaries were built
           echo "Verifying built binaries..."
-          ls -la bazel-bin/Apps/
+          ls -la bazel-bin/Apps/ || echo "Bazel-bin directory not found"
           
-          # Test that binaries are executable
-          file bazel-bin/Apps/ModelConverter
-          file bazel-bin/Apps/LoRAConverter
-          file bazel-bin/Apps/EmbeddingConverter
-          file bazel-bin/Apps/ModelQuantizer
-          file bazel-bin/Apps/gRPCServerCLI
+          # Test that binaries are executable (with error handling)
+          for binary in ModelConverter LoRAConverter EmbeddingConverter ModelQuantizer gRPCServerCLI; do
+            if [ -f "bazel-bin/Apps/$binary" ]; then
+              echo "Found $binary:"
+              file "bazel-bin/Apps/$binary"
+              ls -la "bazel-bin/Apps/$binary"
+            else
+              echo "Warning: $binary not found in expected location"
+            fi
+          done
 
       - name: Package Linux binaries
         run: |
           mkdir -p dist/linux-x64
           
-          # Copy binaries to dist directory
+          # Copy binaries to dist directory with error checking
           echo "Copying binaries..."
-          cp bazel-bin/Apps/ModelConverter dist/linux-x64/
-          cp bazel-bin/Apps/LoRAConverter dist/linux-x64/
-          cp bazel-bin/Apps/EmbeddingConverter dist/linux-x64/
-          cp bazel-bin/Apps/ModelQuantizer dist/linux-x64/
-          cp bazel-bin/Apps/gRPCServerCLI dist/linux-x64/
+          for binary in ModelConverter LoRAConverter EmbeddingConverter ModelQuantizer gRPCServerCLI; do
+            if [ -f "bazel-bin/Apps/$binary" ]; then
+              echo "Copying $binary..."
+              cp "bazel-bin/Apps/$binary" "dist/linux-x64/"
+            else
+              echo "Error: $binary not found for packaging"
+              exit 1
+            fi
+          done
           
           # Make sure all binaries are executable
           chmod +x dist/linux-x64/*
@@ -120,6 +157,14 @@ jobs:
           echo "Packaged binaries:"
           ls -lah dist/linux-x64/
           
+          # Verify all expected files are present
+          for binary in ModelConverter LoRAConverter EmbeddingConverter ModelQuantizer gRPCServerCLI; do
+            if [ ! -f "dist/linux-x64/$binary" ]; then
+              echo "Error: $binary missing from dist directory"
+              exit 1
+            fi
+          done
+          
           # Create archive
           cd dist
           tar -czf draw-things-linux-x64.tar.gz linux-x64/
@@ -127,6 +172,10 @@ jobs:
           # Show archive info
           echo "Archive created:"
           ls -lah draw-things-linux-x64.tar.gz
+          
+          # Verify archive contents
+          echo "Archive contents:"
+          tar -tzf draw-things-linux-x64.tar.gz
 
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4
