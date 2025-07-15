@@ -1,0 +1,107 @@
+name: Release macOS aarch64
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release'
+        required: true
+        default: 'v1.0.0'
+
+jobs:
+  build-macos-aarch64:
+    runs-on: macos-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.8.5
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}
+          repository-cache: true
+
+      - name: Install dependencies
+        run: |
+          # Install coreutils for realpath command
+          brew install coreutils
+
+      - name: Setup repository for macOS
+        run: |
+          ./Scripts/install.sh
+
+      - name: Build macOS binaries
+        run: |
+          # Build all the main binaries for macOS
+          bazel build --config=release //Apps:ModelConverter
+          bazel build --config=release //Apps:LoRAConverter  
+          bazel build --config=release //Apps:EmbeddingConverter
+          bazel build --config=release //Apps:ModelQuantizer
+          bazel build --config=release //Apps:gRPCServerCLI-macOS
+
+      - name: Package macOS binaries
+        run: |
+          mkdir -p dist/macos-aarch64
+          
+          # Copy binaries to dist directory
+          cp bazel-bin/Apps/ModelConverter dist/macos-aarch64/
+          cp bazel-bin/Apps/LoRAConverter dist/macos-aarch64/
+          cp bazel-bin/Apps/EmbeddingConverter dist/macos-aarch64/
+          cp bazel-bin/Apps/ModelQuantizer dist/macos-aarch64/
+          # For macOS, use the special macOS build of gRPCServerCLI
+          cp bazel-bin/Apps/gRPCServerCLI-macOS.app/Contents/MacOS/gRPCServerCLI-macOS dist/macos-aarch64/gRPCServerCLI-macOS
+          
+          # Create archive
+          cd dist
+          tar -czf draw-things-macos-aarch64.tar.gz macos-aarch64/
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: draw-things-macos-aarch64
+          path: dist/draw-things-macos-aarch64.tar.gz
+          retention-days: 30
+
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: dist/draw-things-macos-aarch64.tar.gz
+          name: Release ${{ github.ref_name }}
+          body: |
+            Draw Things Community Release ${{ github.ref_name }}
+            
+            ## macOS aarch64 (Apple Silicon) Binaries
+            
+            - ModelConverter
+            - LoRAConverter  
+            - EmbeddingConverter
+            - ModelQuantizer
+            - gRPCServerCLI-macOS
+            
+            ## Usage
+            
+            Extract the archive and run the binaries:
+            ```bash
+            tar -xzf draw-things-macos-aarch64.tar.gz
+            cd macos-aarch64
+            ./gRPCServerCLI-macOS /path/to/models
+            ```
+            
+            **Note:** On macOS, you may need to allow the binaries to run by going to System Preferences > Privacy & Security if you get a security warning.
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,99 @@
+name: Release Linux x64
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release'
+        required: true
+        default: 'v1.0.0'
+
+jobs:
+  build-linux-x64:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.8.5
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}
+          repository-cache: true
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang libc6-dev
+
+      - name: Setup repository for Linux
+        run: |
+          ./Scripts/install.sh
+
+      - name: Build Linux binaries
+        run: |
+          # Build all the main binaries for Linux
+          bazel build --config=release //Apps:ModelConverter
+          bazel build --config=release //Apps:LoRAConverter  
+          bazel build --config=release //Apps:EmbeddingConverter
+          bazel build --config=release //Apps:ModelQuantizer
+          bazel build --config=release //Apps:gRPCServerCLI
+
+      - name: Package Linux binaries
+        run: |
+          mkdir -p dist/linux-x64
+          
+          # Copy binaries to dist directory
+          cp bazel-bin/Apps/ModelConverter dist/linux-x64/
+          cp bazel-bin/Apps/LoRAConverter dist/linux-x64/
+          cp bazel-bin/Apps/EmbeddingConverter dist/linux-x64/
+          cp bazel-bin/Apps/ModelQuantizer dist/linux-x64/
+          cp bazel-bin/Apps/gRPCServerCLI dist/linux-x64/
+          
+          # Create archive
+          cd dist
+          tar -czf draw-things-linux-x64.tar.gz linux-x64/
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: draw-things-linux-x64
+          path: dist/draw-things-linux-x64.tar.gz
+          retention-days: 30
+
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: dist/draw-things-linux-x64.tar.gz
+          name: Release ${{ github.ref_name }}
+          body: |
+            Draw Things Community Release ${{ github.ref_name }}
+            
+            ## Linux x64 Binaries
+            
+            - ModelConverter
+            - LoRAConverter  
+            - EmbeddingConverter
+            - ModelQuantizer
+            - gRPCServerCLI
+            
+            ## Usage
+            
+            Extract the archive and run the binaries:
+            ```bash
+            tar -xzf draw-things-linux-x64.tar.gz
+            cd linux-x64
+            ./gRPCServerCLI /path/to/models
+            ```
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
