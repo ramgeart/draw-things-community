@@ -32,6 +32,7 @@ jobs:
           bazelisk-cache: true
           disk-cache: ${{ github.workflow }}
           repository-cache: true
+        timeout-minutes: 15
 
       - name: Install dependencies
         run: |
@@ -43,29 +44,67 @@ jobs:
           ./Scripts/install.sh
 
       - name: Build macOS binaries
+        timeout-minutes: 60
         run: |
-          # Build all the main binaries for macOS
-          bazel build --config=release //Apps:ModelConverter
-          bazel build --config=release //Apps:LoRAConverter  
-          bazel build --config=release //Apps:EmbeddingConverter
-          bazel build --config=release //Apps:ModelQuantizer
-          bazel build --config=release //Apps:gRPCServerCLI-macOS
+          # Build all the main binaries for macOS with verbose output
+          echo "Building ModelConverter..."
+          bazel build --config=release //Apps:ModelConverter --verbose_failures
+          
+          echo "Building LoRAConverter..."
+          bazel build --config=release //Apps:LoRAConverter --verbose_failures
+          
+          echo "Building EmbeddingConverter..."
+          bazel build --config=release //Apps:EmbeddingConverter --verbose_failures
+          
+          echo "Building ModelQuantizer..."
+          bazel build --config=release //Apps:ModelQuantizer --verbose_failures
+          
+          echo "Building gRPCServerCLI-macOS..."
+          bazel build --config=release //Apps:gRPCServerCLI-macOS --verbose_failures
+          
+          # Verify binaries were built
+          echo "Verifying built binaries..."
+          ls -la bazel-bin/Apps/
+          
+          # Check the macOS app bundle structure
+          echo "Checking gRPCServerCLI-macOS app bundle..."
+          find bazel-bin/Apps/gRPCServerCLI-macOS.app -type f | head -10
 
       - name: Package macOS binaries
         run: |
           mkdir -p dist/macos-aarch64
           
           # Copy binaries to dist directory
+          echo "Copying binaries..."
           cp bazel-bin/Apps/ModelConverter dist/macos-aarch64/
           cp bazel-bin/Apps/LoRAConverter dist/macos-aarch64/
           cp bazel-bin/Apps/EmbeddingConverter dist/macos-aarch64/
           cp bazel-bin/Apps/ModelQuantizer dist/macos-aarch64/
-          # For macOS, use the special macOS build of gRPCServerCLI
-          cp bazel-bin/Apps/gRPCServerCLI-macOS.app/Contents/MacOS/gRPCServerCLI-macOS dist/macos-aarch64/gRPCServerCLI-macOS
+          
+          # For macOS, extract the binary from the .app bundle
+          if [ -f "bazel-bin/Apps/gRPCServerCLI-macOS.app/Contents/MacOS/gRPCServerCLI-macOS" ]; then
+            cp bazel-bin/Apps/gRPCServerCLI-macOS.app/Contents/MacOS/gRPCServerCLI-macOS dist/macos-aarch64/gRPCServerCLI-macOS
+          else
+            echo "Warning: gRPCServerCLI-macOS not found in expected location"
+            find bazel-bin/Apps/gRPCServerCLI-macOS.app -name "*gRPCServerCLI*" -type f
+            # Try to find and copy it anyway
+            find bazel-bin/Apps/gRPCServerCLI-macOS.app -name "*gRPCServerCLI*" -type f -exec cp {} dist/macos-aarch64/gRPCServerCLI-macOS \;
+          fi
+          
+          # Make sure all binaries are executable
+          chmod +x dist/macos-aarch64/*
+          
+          # Verify files and show sizes
+          echo "Packaged binaries:"
+          ls -lah dist/macos-aarch64/
           
           # Create archive
           cd dist
           tar -czf draw-things-macos-aarch64.tar.gz macos-aarch64/
+          
+          # Show archive info
+          echo "Archive created:"
+          ls -lah draw-things-macos-aarch64.tar.gz
 
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
@@ -85,11 +124,13 @@ jobs:
             
             ## macOS aarch64 (Apple Silicon) Binaries
             
-            - ModelConverter
-            - LoRAConverter  
-            - EmbeddingConverter
-            - ModelQuantizer
-            - gRPCServerCLI-macOS
+            This archive contains the following binaries built for macOS Apple Silicon:
+            
+            - **ModelConverter** - Convert models between different formats
+            - **LoRAConverter** - Convert LoRA models  
+            - **EmbeddingConverter** - Convert embedding models
+            - **ModelQuantizer** - Quantize models for better performance
+            - **gRPCServerCLI-macOS** - gRPC server for Draw Things (macOS optimized)
             
             ## Usage
             
@@ -100,8 +141,14 @@ jobs:
             ./gRPCServerCLI-macOS /path/to/models
             ```
             
-            **Note:** On macOS, you may need to allow the binaries to run by going to System Preferences > Privacy & Security if you get a security warning.
+            ## Requirements
+            
+            - macOS 13.0 or later
+            - Apple Silicon (M1/M2/M3) processor
+            
+            **Security Note:** On first run, macOS may show a security warning. Go to System Preferences > Privacy & Security to allow the applications to run.
           draft: false
           prerelease: false
+          fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

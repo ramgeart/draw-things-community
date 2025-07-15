@@ -27,39 +27,106 @@ jobs:
           bazelisk-cache: true
           disk-cache: ${{ github.workflow }}
           repository-cache: true
+        timeout-minutes: 15
 
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential clang libc6-dev
+          sudo apt-get install -y \
+            build-essential \
+            clang \
+            llvm-dev \
+            libc6-dev \
+            libatlas3-base \
+            libblas3 \
+            libjpeg8-dev \
+            libpng-dev \
+            curl \
+            tar
+
+      - name: Install Swift
+        run: |
+          # Install Swift 6.0.3 for Ubuntu 22.04
+          curl -O https://download.swift.org/swift-6.0.3-release/ubuntu2204/swift-6.0.3-RELEASE/swift-6.0.3-RELEASE-ubuntu22.04.tar.gz
+          tar xzf swift-6.0.3-RELEASE-ubuntu22.04.tar.gz
+          sudo mv swift-6.0.3-RELEASE-ubuntu22.04 /usr/local/swift
+          echo "/usr/local/swift/usr/bin" >> $GITHUB_PATH
+          echo "LD_LIBRARY_PATH=/usr/local/swift/usr/lib/swift/linux:${LD_LIBRARY_PATH}" >> $GITHUB_ENV
 
       - name: Setup repository for Linux
         run: |
-          ./Scripts/install.sh
+          # Verify Swift installation
+          swift --version
+          
+          # Setup for Linux without requiring specific LLVM installation path
+          echo "try-import %workspace%/.bazelrc.linux" > .bazelrc
+          ln -s WORKSPACE.linux WORKSPACE
+          
+          # Setup git hooks
+          mkdir -p .git/hooks/pre-commit.d
+          rm -f .git/hooks/pre-commit
+          ln -s $(pwd)/Scripts/vendors/dispatch .git/hooks/pre-commit
+          rm -f .git/hooks/pre-commit.d/swift-format
+          ln -s $(pwd)/Scripts/swift-format/pre-commit .git/hooks/pre-commit.d/swift-format
+          rm -f .git/hooks/pre-commit.d/buildifier
+          ln -s $(pwd)/Scripts/buildifier/pre-commit .git/hooks/pre-commit.d/buildifier
 
       - name: Build Linux binaries
+        timeout-minutes: 60
         run: |
-          # Build all the main binaries for Linux
-          bazel build --config=release //Apps:ModelConverter
-          bazel build --config=release //Apps:LoRAConverter  
-          bazel build --config=release //Apps:EmbeddingConverter
-          bazel build --config=release //Apps:ModelQuantizer
-          bazel build --config=release //Apps:gRPCServerCLI
+          # Build all the main binaries for Linux with verbose output
+          echo "Building ModelConverter..."
+          bazel build --config=release //Apps:ModelConverter --verbose_failures
+          
+          echo "Building LoRAConverter..."
+          bazel build --config=release //Apps:LoRAConverter --verbose_failures
+          
+          echo "Building EmbeddingConverter..."
+          bazel build --config=release //Apps:EmbeddingConverter --verbose_failures
+          
+          echo "Building ModelQuantizer..."
+          bazel build --config=release //Apps:ModelQuantizer --verbose_failures
+          
+          echo "Building gRPCServerCLI..."
+          bazel build --config=release //Apps:gRPCServerCLI --verbose_failures
+          
+          # Verify binaries were built
+          echo "Verifying built binaries..."
+          ls -la bazel-bin/Apps/
+          
+          # Test that binaries are executable
+          file bazel-bin/Apps/ModelConverter
+          file bazel-bin/Apps/LoRAConverter
+          file bazel-bin/Apps/EmbeddingConverter
+          file bazel-bin/Apps/ModelQuantizer
+          file bazel-bin/Apps/gRPCServerCLI
 
       - name: Package Linux binaries
         run: |
           mkdir -p dist/linux-x64
           
           # Copy binaries to dist directory
+          echo "Copying binaries..."
           cp bazel-bin/Apps/ModelConverter dist/linux-x64/
           cp bazel-bin/Apps/LoRAConverter dist/linux-x64/
           cp bazel-bin/Apps/EmbeddingConverter dist/linux-x64/
           cp bazel-bin/Apps/ModelQuantizer dist/linux-x64/
           cp bazel-bin/Apps/gRPCServerCLI dist/linux-x64/
           
+          # Make sure all binaries are executable
+          chmod +x dist/linux-x64/*
+          
+          # Verify files and show sizes
+          echo "Packaged binaries:"
+          ls -lah dist/linux-x64/
+          
           # Create archive
           cd dist
           tar -czf draw-things-linux-x64.tar.gz linux-x64/
+          
+          # Show archive info
+          echo "Archive created:"
+          ls -lah draw-things-linux-x64.tar.gz
 
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4
@@ -79,11 +146,13 @@ jobs:
             
             ## Linux x64 Binaries
             
-            - ModelConverter
-            - LoRAConverter  
-            - EmbeddingConverter
-            - ModelQuantizer
-            - gRPCServerCLI
+            This archive contains the following binaries built for Linux x64:
+            
+            - **ModelConverter** - Convert models between different formats
+            - **LoRAConverter** - Convert LoRA models  
+            - **EmbeddingConverter** - Convert embedding models
+            - **ModelQuantizer** - Quantize models for better performance
+            - **gRPCServerCLI** - gRPC server for Draw Things
             
             ## Usage
             
@@ -93,7 +162,13 @@ jobs:
             cd linux-x64
             ./gRPCServerCLI /path/to/models
             ```
+            
+            ## Requirements
+            
+            - Linux x64 system
+            - Libraries: libatlas3-base, libblas3, libjpeg8, libpng16
           draft: false
           prerelease: false
+          fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
